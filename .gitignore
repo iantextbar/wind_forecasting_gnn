@@ -8,3 +8,12 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Data
+# Raw ONS files are re-downloadable (URLs in src/data/raw/SOURCES.md): track only the folder layout.
+src/data/raw/*/*
+!src/data/raw/*/.gitkeep
+# Derived layers are rebuilt by the pipeline.
+src/data/bronze/
+src/data/silver/
+src/data/gold/
