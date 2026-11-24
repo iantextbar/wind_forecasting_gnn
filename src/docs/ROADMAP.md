@@ -8,15 +8,17 @@ Phases from data to paper. Each phase has a target window, a status and exit cri
 - **Weather and other features** are prepared in every data phase (1–5) alongside the ONS data. Node features are not all decided yet.
 
 ## Current position
-Phase 1 is in progress. The ONS raw data was downloaded on 2026-11-20 (URLs: [`src/data/raw/SOURCES.md`](../data/raw/SOURCES.md)).
+Phase 1 is in progress. Raw data so far (URLs and dates: [`src/data/raw/SOURCES.md`](../data/raw/SOURCES.md)): ONS, downloaded 2026-11-20, bronze built; ANEEL SIGEL turbines and farms, snapshot of 2026-11-24. The ERA5 download is expected to finish between 2026-11-27 and 2026-11-29; the INMET website is down.
+
+**Plan change (2026-11-24):** the weather data arrives later than phase 1 planned. Instead of waiting, the ONS + SIGEL stream (capacity factor, curtailment, registries, turbines) goes ahead through phases 2 and 3: bronze EDA, data decisions, silver. ERA5 and INMET join each phase when they arrive, so their work is the remaining half rather than the whole.
 
 ## Overview
 
 | # | Phase | Target | Status |
 |---|---|---|---|
 | 1 | Bronze layer | Nov 23 – Nov 29 | `In progress` |
-| 2 | Bronze EDA and data decisions | Nov 30 – Dec 3 | `Not started` |
-| 3 | Silver layer | Dec 1 – Dec 6 | `Not started` |
+| 2 | Bronze EDA and data decisions | Nov 25 – Dec 3 (ONS + SIGEL first) | `Not started` |
+| 3 | Silver layer | Nov 28 – Dec 6 (ONS + SIGEL first) | `Not started` |
 | 4 | Silver EDA | Dec 7 – Dec 9 | `Not started` |
 | 5 | Gold layer and infrastructure | Dec 7 – Dec 13 | `Not started` |
 | 6 | Baselines | Dec 14 – Dec 20 | `Not started` |
@@ -45,6 +47,8 @@ Start drafting the related-work, data and method sections in December, alongside
   - the number of INMET stations near the farms (feeds D-019)
   - the ERA5 leakage choice (D-023)
   - evaluation protocol confirmed: folds and seeds (D-021), horizon and metrics (D-022), compute budget (D-015)
+- **Ideas to evaluate:**
+  - **Wake-interference edges from SIGEL layer 1** (`Região de Interferência`). Each polygon is an area of about 5 × 6 km drawn around one farm from a wind rose (`NUM_PETALAS` sectors of 12 or 16), reaching furthest on the side the prevailing wind comes from (`DIRECAO_PREDO`). It marks where another farm could put this one in its wake. "Farm j has turbines inside farm i's region" defines a directed, sparse edge j → i that the wind's direction sets: a static, physically grounded edge source to compare with ERA5-driven edges (D-004), alongside a simpler variant using only each farm's `DIRECAO_PREDO`. To check: how many node pairs it connects once farms are mapped to nodes, and whether it is too sparse at the conjunto level. Data quirks: 188 regions have no direction, one has an invalid value (30545), one has no polygon.
 
 ### 3. Silver layer
 - **Work:** cleaned, validated, time-aligned data and features (D-001), following the phase-2 decisions.
