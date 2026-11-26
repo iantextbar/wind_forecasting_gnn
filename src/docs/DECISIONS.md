@@ -31,6 +31,24 @@ Design decisions about data layers, models, efficiency and experiments. Tool and
 - **Why:** the full grid is far larger than what the nodes need.
 - **Trade-off:** the CDS API queue is slow, and a Zarr store chunked by time is slow to read as point series.
 
+### D-028 Bronze ingestion architecture
+`Decided` · 2026-11-24
+- **Decision:** one generic build pipeline, configured per source by a declarative spec.
+  - **`SourceSpec`** (one per source, in a registry `SOURCES: dict[str, SourceSpec]`): file patterns, target schema, string formats for dates/times, sort keys, the keys expected to be unique, the time column, and a reader.
+  - **Readers**, one class per **file format** (not per source), behind a `RawReader` protocol: `ParquetReader` for all ONS sources; INMET CSV and ERA5 readers are added when that data lands. The spec holds a reader instance, so the pipeline never branches on file type.
+  - **Pipeline:** `build_bronze(spec, paths)` and `build_all(names)`. They receive everything they use (dependency injection).
+  - **Layout:** code in `src/scripts/bronze/` (`readers.py`, `schemas.py` for column dtypes, `specs.py` for everything else per source, `casting.py`, `build.py`, `__main__.py`); reusable checks, paths and logging in `src/scripts/utils/`.
+- **Processing:** one raw file at a time: read → cast to the spec's schema → check → stable sort by the sort keys → write one part. Peak memory is one raw file, not the whole source.
+- **Output:** a directory of sorted parts per source, `bronze/<source>/part-NNNNN.parquet`, numbered in time order, plus `_bronze_meta.json` (input files with sha256, rows, casts, empty-string counts, duplicate counts, time ranges, git commit, Polars version). `pl.scan_parquet("bronze/<source>/*.parquet")` reads it as one table.
+  - The raw files split each source by time period without overlap, so time-ordered parts give a globally sorted source without a global sort (D-011). The build fails if two parts' time ranges overlap.
+  - A source is rebuilt into a temporary directory and swapped in only when complete. It is skipped when its spec and input hashes match the existing metadata.
+- **Casting rules:** every column must be declared; a missing or unexpected column fails the build (schema drift is caught, never silently passed on). Strings become numbers, dates or times only through strict casts: an unparseable value fails the build. The one exception is the empty string `""`, ONS's encoding of a missing number, which becomes null and is counted in the metadata.
+- **Bronze reports, silver decides:** duplicate keys, invalid-data flags, the `Eólica` filter and timezone handling are left to silver. Bronze only counts duplicates. Timestamps stay timezone-naive and unchanged.
+- **Execution:** sequential; Polars multithreads within each file. The work is CPU- and memory-bound on a 2-core, 3 GB WSL machine, so running sources in parallel would compete for cores and multiply peak memory. Sources share no state, so a process pool can be added if the pipeline moves to a larger machine.
+- **Not adopted: Delta Lake.** Its atomic commits, schema enforcement and upserts are already covered (single writer + directory swap, spec casts, part rebuilds). Its time travel would pin bronze versions, but training reads gold (D-002) and provenance is in the metadata. It would add a dependency, disk used by old versions, and force every reader through `scan_delta`. **Revisit if:** several writers, or the need to roll bronze back to an earlier version.
+- **Revisit if:** a source needs different processing *steps* (not just different values): add an optional per-spec transform hook then, not before.
+- 2026-11-24: second reader added, `ArcGisQueryReader`, for the ANEEL SIGEL snapshot (JSON query responses). Column dtypes come from each response's `fields` list, converted strictly. Point geometry becomes `geometry_x`/`geometry_y`; other geometry is kept as JSON text. Specs gained `raw_folder` (several sources share one dated snapshot folder, which the spec pins) and `companions` (expected non-data files). The unclaimed-file check moved to `build_all`, across all specs. Sources without a time column count duplicate keys across all their parts, since pages can repeat a key.
+
 ## Graph and model
 
 ### D-004 Weather-driven edges computed on the fly

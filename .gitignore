@@ -17,3 +17,9 @@ src/data/raw/*/*
 src/data/bronze/
 src/data/silver/
 src/data/gold/
+
+# Run logs (optional, see scripts.utils.log); often large, and machine-specific.
+src/logs/
+
+# Personal notes, not part of the project record.
+src/docs/personal/

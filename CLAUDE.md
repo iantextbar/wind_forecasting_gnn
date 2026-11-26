@@ -15,7 +15,7 @@ Forecast **hourly wind-power output per node** in the Brazilian grid with a spat
 ## Data
 ONS open data: dados.ons.org.br, S3 bucket `ons-aws-prod-opendata` (use Parquet). ONS revises published values, so record the download date of every raw file. No download-date manifest exists yet.
 
-All data lives under `data/` (gitignored). Raw files are in `data/raw/<folder>/`, one folder per dataset, each with the ONS data dictionary PDF (`DicionarioDados_*.pdf`).
+All data lives under `src/data/` (gitignored; the root is configurable, see `scripts.utils.paths`). Raw files are in `src/data/raw/<folder>/`, one folder per dataset, each with the ONS data dictionary PDF (`DicionarioDados_*.pdf`).
 
 ### Core datasets
 | Local folder (dataset slug) | Key fields | Resolution / period | Notes |
@@ -30,6 +30,7 @@ All data lives under `data/` (gitignored). Raw files are in `data/raw/<folder>/`
 - `disponibilidade_usina`: plant availability (`val_potenciainstalada`, `val_dispoperacional`). Has a gap: 2015_01–02, then 2023→.
 - `previsao_vs_programado_eolica_solar`: ONS's own forecast vs. scheduled values, daily files from Oct 2024; a possible baseline. Keyed by `cod_usinapdp`, not `id_ons`.
 - `cadastro_*`: static registries (installed capacity per generating unit, operating mode, plant ↔ conjunto membership with validity dates). Membership changes over time, so join on the validity interval.
+- `aneel_sigel_eolicas/<UTC stamp>/` (not ONS): ANEEL SIGEL snapshot of turbines (rated power, hub height, rotor diameter, location), farms by licensing phase (incl. start of operation), and per-farm wake-interference regions with prevailing wind direction. Current state only, so time-varying use must respect commissioning dates. Links to ONS nodes via `CEG` → `cadastro_relacionamento_usina_conjunto`. Bronze: `sigel_aerogeradores`, `sigel_parques`, `sigel_regiao_interferencia`.
 
 ### Weather
 - **ERA5:** hourly, 0.25°, includes 100 m u/v wind.
@@ -39,19 +40,22 @@ Check every source's timezone convention before joining. ONS `din_instante` is s
 
 ## Code conventions
 - **Modularity:** pipeline stages are separate modules with clear inputs and outputs. Parts that vary across experiments sit behind small interfaces (e.g. edge builders); add a variant as a new implementation, not as `if` branches. One responsibility per class or function; inject dependencies instead of constructing them deep inside. Add an abstraction only when a second implementation exists or is planned.
-- **Data layers (Medallion):** `data/raw/` is immutable. `data/bronze/` = each source's raw files concatenated into a uniform typed format, with sanity checks (dtypes, schema) while concatenating, content unchanged; `data/silver/` = cleaned, validated, time-aligned, plus feature engineering; `data/gold/` = model-ready. Only code writes the layers below raw.
+- **Data layers (Medallion):** `src/data/raw/` is immutable. `src/data/bronze/` = each source's raw files concatenated into a uniform typed format, with sanity checks (dtypes, schema) while concatenating, content unchanged (design: D-028); `src/data/silver/` = cleaned, validated, time-aligned, plus feature engineering; `src/data/gold/` = model-ready. Only code writes the layers below raw.
 - **No boilerplate:** no copied scripts or duplicated helpers; experiments differ by configuration, not code. No magic numbers.
 - **Comments:** explain *why* (physical reasoning, data quirks, leakage concerns), not *what*. Docstrings state **units** and **tensor shapes**. Use type hints.
-- **Logging:** use a logger, never print. Log pipeline steps, dataset sizes, and how many rows each step drops and why. Each run records its config, git commit, seed, GPU model, torch/CUDA versions and data download dates.
+- **Logging:** use a logger, never print. Log pipeline steps, dataset sizes, and how many rows each step drops and why. Each run records its config, git commit, seed, GPU model, torch/CUDA versions and data download dates. Saving a run's log is optional (`--save-log` on each entry point, via `scripts.utils.log`): files go to `src/logs/<step>/<UTC timestamp>.log`, with steps like `data/bronze`, `data/silver`, `model/DCRNN`, and record DEBUG even when the terminal shows INFO. On Colab, set `WIND_GNN_LOG_ROOT` to a Drive folder.
 - **Tests:** cover data transforms, always including a no-leakage test and timezone alignment. Validate data at layer boundaries (schema, ranges, no duplicate (node, time) pairs).
 
 ## Tooling
-- Python 3.12, managed with `uv` (`uv add <pkg>`, `uv run <cmd>`). No dependencies are declared yet.
+- Python 3.12, managed with `uv` (`uv add <pkg>`, `uv run <cmd>`); dependencies are in `pyproject.toml`.
+- Code lives in `src/scripts/` and installs as the package `scripts`: one folder per pipeline stage (e.g. `bronze/`), reusable modules in `utils/`. Tests are in `tests/` (`uv run pytest`).
+- Build bronze: `uv run python -m scripts.bronze [--source NAME] [--force] [--save-log]`.
+- Style: PEP 8 via `ruff`, line length 88 (config in `pyproject.toml`). Run `uv run ruff format` and `uv run ruff check` before finishing a change. Inside functions, separate logical steps (read, check, transform, write) with a blank line.
 
 ## Training runs on Colab
 The data pipeline runs locally; model training runs in Colab, which cannot read local files.
 - **Paths:** never hardcode paths. Resolve every data and output location from one configurable root, so the same code works locally and under `/content`.
-- **Data in Colab:** download ONS and ERA5 directly into the runtime (both are on public cloud storage), or keep `data/gold/` on Drive and copy it to `/content` at the start of each session. Never train reading from Drive directly, because it is slow.
+- **Data in Colab:** download ONS and ERA5 directly into the runtime (both are on public cloud storage), or keep `src/data/gold/` on Drive and copy it to `/content` at the start of each session. Never train reading from Drive directly, because it is slow.
 - **Ephemeral runtime:** write checkpoints and run records to Drive so they survive disconnects. Training must be able to resume from a checkpoint.
 - **Hydra:** use the Compose API (`hydra.initialize` / `hydra.compose`), not `@hydra.main`. `@hydra.main` parses `sys.argv` and changes the working directory, which breaks in notebooks.
 - **Install:** the package must install in Colab with plain `pip install` from the repo; keep anything that only works locally out of the core dependencies.
