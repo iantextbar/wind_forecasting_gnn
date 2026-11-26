@@ -1,9 +1,10 @@
 """Bronze schema of every raw source: each column and its bronze dtype, in order.
 
-Schemas were surveyed from the raw files: ONS downloaded on 2026-11-20, SIGEL on
-2026-11-24. Type drift between raw files is noted next to the column; ``casting.py``
-converts every file to these dtypes. Units follow each source's data dictionary
-(ONS PDFs, SIGEL layer metadata ``camada_<n>_metadata.json``).
+Schemas were surveyed from the raw files: ONS downloaded on 2026-11-20, SIGEL and
+INMET on 2026-11-24 (INMET surveyed on 2026-11-26). Type drift between raw files is
+noted next to the column; ``casting.py`` converts every file to these dtypes. Units
+follow each source's data dictionary (ONS PDFs, SIGEL layer metadata
+``camada_<n>_metadata.json``) or, for INMET, the units in its column headers.
 """
 
 from __future__ import annotations
@@ -288,4 +289,56 @@ SIGEL_PARQUES_SCHEMA: Schema = {
     "Cod_Leilao": pl.String,
     "geometry_x": pl.Float64,  # longitude, degrees WGS84 (server reprojection)
     "geometry_y": pl.Float64,  # latitude, degrees WGS84
+}
+
+# --- INMET automatic stations (raw_formats.inmet names the columns) ---
+
+# Measurements are Float32: INMET writes at most 5 significant digits, which Float32
+# holds exactly (casting.FLOAT32_EXACT_DIGITS), at half the memory of Float64; a
+# year of observations as Float64 exceeds this machine's RAM while being sorted.
+# Cast to Float64 before arithmetic that accumulates error (e.g. u/v components).
+MEASUREMENT = pl.Float32
+
+INMET_HORARIO_SCHEMA: Schema = {
+    "codigo_wmo": pl.String,  # station code, e.g. "A001"
+    "data": pl.Date,  # UTC date
+    # UTC hour. Whether it opens or closes the hour the values cover is not yet
+    # verified; it matters for leakage and is settled in silver.
+    "hora_utc": pl.Time,
+    "precipitacao_total": MEASUREMENT,  # mm over the hour
+    "pressao_estacao": MEASUREMENT,  # hPa (mB) at station level
+    "pressao_max_hora_anterior": MEASUREMENT,  # hPa
+    "pressao_min_hora_anterior": MEASUREMENT,  # hPa
+    "radiacao_global": MEASUREMENT,  # kJ/m² over the hour
+    "temperatura_ar": MEASUREMENT,  # °C, dry bulb
+    "temperatura_orvalho": MEASUREMENT,  # °C, dew point
+    "temperatura_max_hora_anterior": MEASUREMENT,  # °C
+    "temperatura_min_hora_anterior": MEASUREMENT,  # °C
+    "temperatura_orvalho_max_hora_anterior": MEASUREMENT,  # °C
+    "temperatura_orvalho_min_hora_anterior": MEASUREMENT,  # °C
+    "umidade_relativa_max_hora_anterior": MEASUREMENT,  # %
+    "umidade_relativa_min_hora_anterior": MEASUREMENT,  # %
+    "umidade_relativa": MEASUREMENT,  # %
+    # Meteorological convention: the direction the wind blows from, 0 = north.
+    # An angle: interpolate u/v components, never this column.
+    "vento_direcao": MEASUREMENT,  # degrees
+    "vento_rajada_max": MEASUREMENT,  # m/s, gust; roughly 10 m above ground
+    "vento_velocidade": MEASUREMENT,  # m/s, hourly mean; roughly 10 m above ground
+}
+
+INMET_ESTACOES_SCHEMA: Schema = {
+    "arquivo": pl.String,  # CSV name inside the yearly archive
+    "regiao": pl.String,
+    "uf": pl.String,
+    "estacao": pl.String,  # station name; 2019 files have "?" for accented letters
+    "codigo_wmo": pl.String,
+    "latitude": pl.Float64,  # degrees; precision varies between years
+    "longitude": pl.Float64,  # degrees
+    "altitude": pl.Float64,  # m
+    # Kept as text: "YYYY-MM-DD" until 2018, then "dd/mm/yy", whose two-digit year
+    # can't be told apart from 20yy by parsing; silver resolves it against the
+    # four-digit spelling.
+    "data_fundacao": pl.String,
+    "periodo_inicio": pl.Date,  # first day the file covers, from its name
+    "periodo_fim": pl.Date,  # last day, from its name; one file disagrees (EDA)
 }

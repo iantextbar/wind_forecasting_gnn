@@ -16,11 +16,18 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import polars as pl
 
-from scripts.bronze.readers import ArcGisQueryReader, ParquetReader, RawReader
+from scripts.bronze.casting import TextEncoding
+from scripts.bronze.readers import (
+    ArcGisQueryReader,
+    InmetObservationReader,
+    InmetStationReader,
+    ParquetReader,
+    RawReader,
+)
 from scripts.bronze.schemas import (
     CADASTRO_CAPACIDADE_INSTALADA_SCHEMA,
     CADASTRO_MODALIDADE_USINA_SCHEMA,
@@ -31,6 +38,8 @@ from scripts.bronze.schemas import (
     DISPONIBILIDADE_USINA_SCHEMA,
     FATOR_CAPACIDADE_SCHEMA,
     GERACAO_USINA_HORARIA_SCHEMA,
+    INMET_ESTACOES_SCHEMA,
+    INMET_HORARIO_SCHEMA,
     PREVISAO_VS_PROGRAMADO_SCHEMA,
     SIGEL_AEROGERADORES_SCHEMA,
     SIGEL_PARQUES_SCHEMA,
@@ -65,8 +74,8 @@ class SourceSpec:
         unique_keys: columns expected to identify a row; violations are counted.
         time_column: column whose range orders the parts and must not overlap
             between them; None for static registries.
-        formats: strptime formats for columns parsed from strings or integers
-            into dates or times.
+        encoding: how the raw files write values as text (null tokens, decimal
+            separator, date/time formats); see ``casting.TextEncoding``.
         reader: how to read one raw file.
         raw_folder: path under ``raw/`` when it differs from ``name``: several
             sources share one folder, or the source pins a dated snapshot.
@@ -80,7 +89,7 @@ class SourceSpec:
     sort_keys: tuple[str, ...]
     unique_keys: tuple[str, ...]
     time_column: str | None
-    formats: Mapping[str, str] = field(default_factory=dict)
+    encoding: TextEncoding = TextEncoding()
     reader: RawReader = ParquetReader()
     raw_folder: str | None = None
     companions: tuple[str, ...] = ()
@@ -92,7 +101,7 @@ class SourceSpec:
 
     def __post_init__(self) -> None:
         declared = set(self.schema)
-        referenced = {*self.sort_keys, *self.unique_keys, *self.formats}
+        referenced = {*self.sort_keys, *self.unique_keys, *self.encoding.formats}
 
         if self.time_column is not None:
             referenced.add(self.time_column)
@@ -122,7 +131,7 @@ class SourceSpec:
             "sort_keys": list(self.sort_keys),
             "unique_keys": list(self.unique_keys),
             "time_column": self.time_column,
-            "formats": dict(self.formats),
+            "encoding": self.encoding.describe(),
             "reader": repr(self.reader),
         }
 
@@ -170,7 +179,9 @@ COFF_INTRA_SEMIHORA = SourceSpec(
     sort_keys=("din_instante", "id_ons", "hor_inicial"),
     unique_keys=("id_ons", "din_instante", "hor_inicial"),
     time_column="din_instante",
-    formats={"hor_inicial": CLOCK_TIME, "hor_final": CLOCK_TIME},
+    encoding=TextEncoding(
+        formats={"hor_inicial": (CLOCK_TIME,), "hor_final": (CLOCK_TIME,)}
+    ),
 )
 
 DISPONIBILIDADE_USINA = SourceSpec(
@@ -202,7 +213,7 @@ PREVISAO_VS_PROGRAMADO = SourceSpec(
     sort_keys=("dat_programacao", "num_patamar", "cod_usinapdp"),
     unique_keys=("cod_usinapdp", "dat_programacao", "num_patamar"),
     time_column="dat_programacao",
-    formats={"dat_programacao": COMPACT_DATE},
+    encoding=TextEncoding(formats={"dat_programacao": (COMPACT_DATE,)}),
 )
 
 CADASTRO_CAPACIDADE_INSTALADA = SourceSpec(
@@ -213,11 +224,13 @@ CADASTRO_CAPACIDADE_INSTALADA = SourceSpec(
     sort_keys=("ceg", "cod_equipamento"),
     unique_keys=("cod_equipamento",),
     time_column=None,
-    formats={
-        "dat_entradateste": ISO_DATE,
-        "dat_entradaoperacao": ISO_DATE,
-        "dat_desativacao": ISO_DATE,
-    },
+    encoding=TextEncoding(
+        formats={
+            "dat_entradateste": (ISO_DATE,),
+            "dat_entradaoperacao": (ISO_DATE,),
+            "dat_desativacao": (ISO_DATE,),
+        }
+    ),
 )
 
 CADASTRO_MODALIDADE_USINA = SourceSpec(
@@ -238,7 +251,12 @@ CADASTRO_RELACIONAMENTO_USINA_CONJUNTO = SourceSpec(
     sort_keys=("id_ons_conjunto", "id_ons_usina", "dat_iniciorelacionamento"),
     unique_keys=("id_ons_conjunto", "id_ons_usina", "dat_iniciorelacionamento"),
     time_column=None,
-    formats={"dat_iniciorelacionamento": ISO_DATE, "dat_fimrelacionamento": ISO_DATE},
+    encoding=TextEncoding(
+        formats={
+            "dat_iniciorelacionamento": (ISO_DATE,),
+            "dat_fimrelacionamento": (ISO_DATE,),
+        }
+    ),
 )
 
 # SIGEL layers are a snapshot of the current registry, not a time series.
@@ -283,6 +301,57 @@ SIGEL_PARQUES = SourceSpec(
     time_column=None,
 )
 
+# INMET: yearly archives of station CSVs; observations and station lines are two
+# sources read from the same archives (scripts.bronze.raw_formats.inmet).
+INMET_FOLDER = "inmet"
+INMET_PATTERNS = ("*.zip",)
+INMET_COMPANIONS = ("SHA256SUMS",)
+INMET_DECIMAL_SEPARATOR = ","
+# The file name's period, dd-mm-yyyy.
+INMET_PERIOD = "%d-%m-%Y"
+
+INMET_HORARIO = SourceSpec(
+    name="inmet_horario",
+    raw_folder=INMET_FOLDER,
+    patterns=INMET_PATTERNS,
+    companions=INMET_COMPANIONS,
+    reader=InmetObservationReader(),
+    schema=INMET_HORARIO_SCHEMA,
+    encoding=TextEncoding(
+        # Missing values: "-9999" in 2009-2018, empty from 2019.
+        null_tokens=("", "-9999"),
+        decimal_separator=INMET_DECIMAL_SEPARATOR,
+        # 2009-2018 spelling first, 2019 onwards second.
+        formats={
+            "data": ("%Y-%m-%d", "%Y/%m/%d"),
+            "hora_utc": ("%H:%M", "%H%M UTC"),
+        },
+    ),
+    sort_keys=("data", "hora_utc", "codigo_wmo"),
+    unique_keys=("codigo_wmo", "data", "hora_utc"),
+    time_column="data",
+)
+
+INMET_ESTACOES = SourceSpec(
+    name="inmet_estacoes",
+    raw_folder=INMET_FOLDER,
+    patterns=INMET_PATTERNS,
+    companions=INMET_COMPANIONS,
+    reader=InmetStationReader(),
+    schema=INMET_ESTACOES_SCHEMA,
+    encoding=TextEncoding(
+        # Altitude is "F" for 17 stations in 2016-2018 and "NULL" once (2026).
+        # Reading "F" as missing is an inference: INMET doesn't document it.
+        null_tokens=("", "F", "NULL"),
+        decimal_separator=INMET_DECIMAL_SEPARATOR,
+        formats={"periodo_inicio": (INMET_PERIOD,), "periodo_fim": (INMET_PERIOD,)},
+    ),
+    # One row per station and year: coordinates and altitude change between years.
+    sort_keys=("periodo_inicio", "codigo_wmo"),
+    unique_keys=("codigo_wmo", "periodo_inicio"),
+    time_column="periodo_inicio",
+)
+
 SOURCES: dict[str, SourceSpec] = {
     spec.name: spec
     for spec in (
@@ -299,5 +368,7 @@ SOURCES: dict[str, SourceSpec] = {
         SIGEL_AEROGERADORES,
         SIGEL_REGIAO_INTERFERENCIA,
         SIGEL_PARQUES,
+        INMET_HORARIO,
+        INMET_ESTACOES,
     )
 }
