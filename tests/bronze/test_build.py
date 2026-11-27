@@ -1,4 +1,6 @@
 import json
+from collections.abc import Iterator
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -108,12 +110,12 @@ def test_timestamps_and_their_values_are_unchanged(paths):
     assert bronze.rows() == expected
 
 
-def test_duplicates_and_empty_strings_are_reported_not_dropped(paths):
+def test_duplicates_and_null_tokens_are_reported_not_dropped(paths):
     report = build_bronze(SPEC, paths)
     assert report.rows == 5
     assert report.duplicate_key_rows == 1
     meta = read_meta(paths)
-    assert meta["empty_strings_to_null"] == {"val": 1}
+    assert meta["null_tokens_to_null"] == {"val": {"": 1}}
     assert meta["parts"][0]["casts"] == {"val": "String -> Float64"}
     assert meta["parts"][1]["casts"] == {}
 
@@ -272,3 +274,24 @@ def test_time_ordered_spec_must_include_time_in_unique_keys():
 def test_metadata_names_the_run_log(paths):
     build_bronze(SPEC, paths, run_log="data/bronze/20261124T172500Z.log")
     assert read_meta(paths)["run_log"] == "data/bronze/20261124T172500Z.log"
+
+
+@dataclass(frozen=True)
+class RowByRowReader:
+    """A Parquet file as one chunk per row, like an archive of many tables."""
+
+    def scan(self, path: Path) -> Iterator[pl.LazyFrame]:
+        frame = pl.read_parquet(path)
+        for index in range(frame.height):
+            yield frame.slice(index, 1).lazy()
+
+
+def test_reading_in_chunks_gives_the_same_output(paths):
+    build_bronze(SPEC, paths)
+    whole, whole_meta = read_bronze(paths), read_meta(paths)
+
+    build_bronze(replace(SPEC, reader=RowByRowReader()), paths)
+    chunked_meta = read_meta(paths)
+    assert read_bronze(paths).equals(whole)
+    for key in ("rows", "duplicate_key_rows", "null_tokens_to_null"):
+        assert chunked_meta[key] == whole_meta[key]

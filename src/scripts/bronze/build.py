@@ -6,7 +6,9 @@ Layout of ``bronze/<source>/`` (D-028):
   ``pl.scan_parquet("bronze/<source>/*.parquet")``.
 - ``_bronze_meta.json``: provenance and per-file reports.
 
-One raw file is processed at a time, so peak memory is one file, not the source.
+One raw file is processed at a time, so peak memory is one file, not the source. A
+reader may split a file into chunks (an archive of tables); each chunk is cast
+before the next is read, so peak memory is the typed file, not its text.
 """
 
 from __future__ import annotations
@@ -25,12 +27,7 @@ from typing import Literal
 
 import polars as pl
 
-from scripts.bronze.casting import (
-    blank_columns,
-    cast_expressions,
-    count_empty_strings,
-    describe_casts,
-)
+from scripts.bronze.casting import cast_chunk
 from scripts.bronze.specs import SourceSpec
 from scripts.utils.checks import (
     OverlapError,
@@ -65,7 +62,7 @@ class FileReport:
     raw_modified_utc: str
     rows: int
     casts: dict[str, str]
-    empty_strings_to_null: dict[str, int]
+    null_tokens_to_null: dict[str, dict[str, int]]
     duplicate_key_rows: int
     time_range: TimeRange | None
     time_nulls: int
@@ -248,19 +245,8 @@ def _ingest_file(
     spec: SourceSpec, path: Path, sha256: str, staging: Path, position: int, total: int
 ) -> FileReport:
     context = f"{spec.name}/{path.name}"
-    lazy = spec.reader.scan(path)
-    source_schema = lazy.collect_schema()
-    check_columns(source_schema.names(), spec.schema, context=context)
-
-    empties = count_empty_strings(lazy, blank_columns(source_schema, spec.schema))
     try:
-        frame = (
-            lazy.select(cast_expressions(source_schema, spec.schema, spec.formats))
-            # Stable sort: rows with equal keys keep their raw order, so the
-            # output is identical on every run (D-011).
-            .sort(spec.sort_keys, maintain_order=True)
-            .collect()
-        )
+        frame, casts, tokens = _cast_and_sort(spec, path, context)
     except pl.exceptions.PolarsError as error:
         raise BronzeBuildError(f"{context}: {error}") from error
 
@@ -269,14 +255,17 @@ def _ingest_file(
 
     part_path = staging / f"{path.stem}.parquet"
     frame.write_parquet(part_path, compression=PARQUET_COMPRESSION)
+    null_tokens = {
+        name: dict(sorted(counts.items())) for name, counts in sorted(tokens.items())
+    }
     logger.debug(
-        "%s: [%d/%d] %d rows, %d duplicate-key rows, empty strings to null %s",
+        "%s: [%d/%d] %d rows, %d duplicate-key rows, null tokens read as null %s",
         context,
         position,
         total,
         frame.height,
         duplicates,
-        empties,
+        null_tokens,
     )
 
     modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
@@ -285,12 +274,58 @@ def _ingest_file(
         sha256=sha256,
         raw_modified_utc=modified.isoformat(timespec="seconds"),
         rows=frame.height,
-        casts=describe_casts(source_schema, spec.schema),
-        empty_strings_to_null=empties,
+        # Chunks of one file normally cast alike; differing casts are all listed.
+        casts={name: " | ".join(sorted(casts[name])) for name in sorted(casts)},
+        null_tokens_to_null=null_tokens,
         duplicate_key_rows=duplicates,
         time_range=time_range,
         time_nulls=time_nulls,
     )
+
+
+def _cast_and_sort(
+    spec: SourceSpec, path: Path, context: str
+) -> tuple[pl.DataFrame, dict[str, set[str]], dict[str, Counter[str]]]:
+    """The file's chunks cast and stably sorted, with each column's casts and its
+    null-token counts summed over the chunks.
+
+    A cast chunk stays lazy until the reader yields the next one. A single-chunk
+    file (Parquet, ArcGIS) is then cast and sorted in one query, holding one copy
+    of the data; an archive's chunks are collected one by one, so its text is
+    freed chunk by chunk, and sorted once combined.
+    """
+    casts: dict[str, set[str]] = {}
+    tokens: dict[str, Counter[str]] = {}
+    collected: list[pl.DataFrame] = []
+    pending: pl.LazyFrame | None = None
+    for chunk in spec.reader.scan(path):
+        if pending is not None:
+            collected.append(pending.collect())
+
+        check_columns(chunk.collect_schema().names(), spec.schema, context=context)
+        result = cast_chunk(chunk, spec.schema, spec.encoding, context)
+        for name, cast in result.casts.items():
+            casts.setdefault(name, set()).add(cast)
+        for name, counts in result.null_tokens.items():
+            tokens.setdefault(name, Counter()).update(counts)
+        pending = result.frame
+
+    if pending is None:
+        raise BronzeBuildError(f"{context}: the reader found no data in the file")
+
+    # Stable sort: rows with equal keys keep their raw order, so the output is
+    # identical on every run (D-011).
+    if not collected:
+        return (
+            pending.sort(spec.sort_keys, maintain_order=True).collect(),
+            casts,
+            tokens,
+        )
+
+    collected.append(pending.collect())
+    combined = pl.concat(collected, rechunk=False)
+    collected.clear()
+    return combined.sort(spec.sort_keys, maintain_order=True), casts, tokens
 
 
 def _time_summary(
@@ -393,9 +428,10 @@ def _metadata(
     duplicates: int,
     run_log: str | None,
 ) -> dict:
-    empties: Counter[str] = Counter()
+    tokens: dict[str, Counter[str]] = {}
     for report in ordered:
-        empties.update(report.empty_strings_to_null)
+        for name, counts in report.null_tokens_to_null.items():
+            tokens.setdefault(name, Counter()).update(counts)
 
     return {
         "source": spec.name,
@@ -408,7 +444,10 @@ def _metadata(
         "spec": spec.describe(),
         "rows": sum(report.rows for report in ordered),
         "duplicate_key_rows": duplicates,
-        "empty_strings_to_null": dict(sorted(empties.items())),
+        "null_tokens_to_null": {
+            name: dict(sorted(counts.items()))
+            for name, counts in sorted(tokens.items())
+        },
         "parts": [
             _part_metadata(index, report) for index, report in enumerate(ordered)
         ],
@@ -424,7 +463,7 @@ def _part_metadata(index: int, report: FileReport) -> dict:
         "raw_modified_utc": report.raw_modified_utc,
         "rows": report.rows,
         "casts": report.casts,
-        "empty_strings_to_null": report.empty_strings_to_null,
+        "null_tokens_to_null": report.null_tokens_to_null,
         "duplicate_key_rows": report.duplicate_key_rows,
         "time_start": time_range.start.isoformat() if time_range else None,
         "time_end": time_range.end.isoformat() if time_range else None,
@@ -440,11 +479,11 @@ def _log_summary(report: BronzeReport, metadata: dict) -> None:
         report.rows,
     )
 
-    if metadata["empty_strings_to_null"]:
+    if metadata["null_tokens_to_null"]:
         logger.info(
-            "%s: empty strings read as null: %s",
+            "%s: null tokens read as null: %s",
             report.source,
-            metadata["empty_strings_to_null"],
+            metadata["null_tokens_to_null"],
         )
 
     if report.duplicate_key_rows:

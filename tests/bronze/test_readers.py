@@ -45,7 +45,8 @@ def attributes(**overrides) -> dict:
 
 
 def read(path: Path) -> pl.DataFrame:
-    return ArcGisQueryReader().scan(path).collect()
+    (chunk,) = ArcGisQueryReader().scan(path)
+    return chunk.collect()
 
 
 def test_dtypes_follow_the_response_fields(tmp_path):

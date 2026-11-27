@@ -14,10 +14,11 @@ The libraries and compute this project uses. Design rules are in [DECISIONS.md](
 | Tabular data | Polars, lazy API scanning Parquet | `Proposed` | Fast on one machine; filtering and column selection happen before loading, which matters with little RAM. | API differs from pandas. Libraries that expect pandas need a conversion through Arrow, which is cheap. |
 | Gridded data | xarray + Zarr/NetCDF | `Proposed` | Reads ERA5 from the ARCO-ERA5 Zarr store or the CDS API. Per-node series are extracted once, then handled in Polars (D-003). | A Zarr store chunked by time is slow to read as long point series. |
 | Data validation | `pandera`, Polars backend | `Proposed` | Validates whole columns at layer boundaries, LazyFrames included (Polars support since v0.19, checked 2026-11-21). | — |
-| Logging | Standard-library `logging` | `Proposed` | Hydra configures it and writes each run's log next to its config; third-party libraries log through it too. | — |
+| Logging | Standard-library `logging`, set up by `scripts.utils.log` | `Decided` | Third-party libraries log through it too. Saving a run's log is optional, in `src/logs/<step>/` (D-029). Hydra's own log files come only with `@hydra.main`, which D-013 rules out. | — |
 | Experiment tracking | Weights & Biases: runs, sweeps, Artifacts for checkpoints (optionally data snapshots) | `Proposed` | Works from Colab with no server to run; its storage outlives the runtime. | A cloud account and some lock-in. |
 | Environment | `uv` + `pyproject.toml` + lockfile. On Colab: `git clone` + `pip install -e .` | `Proposed` | The same environment locally and on Colab. | Setup at the start of each session. Colab's preinstalled torch changes over time, so each run logs its torch/CUDA versions (D-011). |
-| Code quality | `ruff` (lint and format), `pytest`, pre-commit hooks | `Proposed` | Standard and fast. | — |
+| Code quality | `ruff` (lint and format; PEP 8, line length 88, config in `pyproject.toml`), `pytest` | `Decided` | Standard and fast. In use since 2026-11-24. | — |
+| Code quality | pre-commit hooks running `ruff` | `Proposed` | Keeps new code formatted without remembering to run it. | One more tool to install. |
 
 ## Compute
 
